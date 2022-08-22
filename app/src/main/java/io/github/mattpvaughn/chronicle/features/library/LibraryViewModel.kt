@@ -9,6 +9,7 @@ import io.github.mattpvaughn.chronicle.data.local.IBookRepository
 import io.github.mattpvaughn.chronicle.data.local.ITrackRepository
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_BOOK_SORT_BY
+import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_HIDE_PLAYED_AUDIOBOOKS
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_IS_LIBRARY_SORT_DESCENDING
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_LIBRARY_VIEW_STYLE
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_OFFLINE_MODE
@@ -19,6 +20,7 @@ import io.github.mattpvaughn.chronicle.data.model.Audiobook.Companion.SORT_KEY_D
 import io.github.mattpvaughn.chronicle.data.model.Audiobook.Companion.SORT_KEY_DURATION
 import io.github.mattpvaughn.chronicle.data.model.Audiobook.Companion.SORT_KEY_PLAYS
 import io.github.mattpvaughn.chronicle.data.model.Audiobook.Companion.SORT_KEY_TITLE
+import io.github.mattpvaughn.chronicle.data.model.Audiobook.Companion.SORT_KEY_YEAR
 import io.github.mattpvaughn.chronicle.data.model.MediaItemTrack
 import io.github.mattpvaughn.chronicle.data.model.getProgress
 import io.github.mattpvaughn.chronicle.data.sources.plex.ICachedFileManager
@@ -90,6 +92,12 @@ class LibraryViewModel(
         sharedPreferences
     )
 
+    val arePlayedAudiobooksHidden = BooleanPreferenceLiveData(
+        KEY_HIDE_PLAYED_AUDIOBOOKS,
+        false,
+        sharedPreferences
+    )
+
     private val sortKey =
         StringPreferenceLiveData(KEY_BOOK_SORT_BY, SORT_KEY_TITLE, sharedPreferences)
     val isOffline = BooleanPreferenceLiveData(KEY_OFFLINE_MODE, false, sharedPreferences)
@@ -97,46 +105,51 @@ class LibraryViewModel(
     private var prevBooks = emptyList<Audiobook>()
 
     private val allBooks = bookRepository.getAllBooks()
-    val books = QuadLiveDataAsync(
+    val books = QuintLiveDataAsync(
         viewModelScope,
         allBooks,
         isSortDescending,
         sortKey,
+        arePlayedAudiobooksHidden,
         isOffline
-    ) { _books, _isDescending, _sortKey, _isOffline ->
+    ) { _books, _isDescending, _sortKey, _hidePlayed, _isOffline ->
         if (_books.isNullOrEmpty()) {
-            return@QuadLiveDataAsync emptyList<Audiobook>()
+            return@QuintLiveDataAsync emptyList<Audiobook>()
         }
 
         // Use defaults if provided null values
         val desc = _isDescending ?: true
         val key = _sortKey ?: SORT_KEY_TITLE
+        val hidePlayed = _hidePlayed ?: false
         val offline = _isOffline ?: false
 
-        val results = _books.filter { !offline || it.isCached && offline }
-            .sortedWith(Comparator { book1, book2 ->
-                val descMultiplier = if (desc) 1 else -1
-                return@Comparator descMultiplier * when (key) {
-                    SORT_KEY_AUTHOR -> sortAuthorComparator(book1.author, book2.author)
-                    SORT_KEY_TITLE -> sortTitleComparator(book1.titleSort, book2.titleSort)
-                    SORT_KEY_PLAYS -> book2.viewedLeafCount.compareTo(book1.viewedLeafCount)
-                    SORT_KEY_DURATION -> book2.duration.compareTo(book1.duration)
-                    // Note: Reverse order for timestamps, because most recent should be at the top
-                    // of descending, even though the timestamp is larger
-                    SORT_KEY_DATE_ADDED -> book2.addedAt.compareTo(book1.addedAt)
-                    SORT_KEY_DATE_PLAYED -> book2.lastViewedAt.compareTo(book1.lastViewedAt)
-                    else -> throw NoWhenBranchMatchedException("Unknown sort key: $key")
+        val results = _books.filter { (!offline || it.isCached && offline) && (!hidePlayed || hidePlayed && it.viewCount == 0L) }
+            .sortedWith(
+                Comparator { book1, book2 ->
+                    val descMultiplier = if (desc) 1 else -1
+                    return@Comparator descMultiplier * when (key) {
+                        SORT_KEY_AUTHOR -> sortAuthorComparator(book1.author, book2.author)
+                        SORT_KEY_TITLE -> book1.titleSort.compareTo(book2.titleSort)
+                        SORT_KEY_PLAYS -> book2.viewedLeafCount.compareTo(book1.viewedLeafCount)
+                        SORT_KEY_DURATION -> book2.duration.compareTo(book1.duration)
+                        // Note: Reverse order for timestamps, because most recent should be at the top
+                        // of descending, even though the timestamp is larger
+                        SORT_KEY_DATE_ADDED -> book2.addedAt.compareTo(book1.addedAt)
+                        SORT_KEY_DATE_PLAYED -> book2.lastViewedAt.compareTo(book1.lastViewedAt)
+                        SORT_KEY_YEAR -> book2.year.compareTo(book1.year)
+                        else -> throw NoWhenBranchMatchedException("Unknown sort key: $key")
+                    }
                 }
-            })
+            )
 
         // If nothing has changed, return prevBooks
         if (prevBooks.map { it.id } == results.map { it.id }) {
-            return@QuadLiveDataAsync prevBooks
+            return@QuintLiveDataAsync prevBooks
         }
 
         prevBooks = results
 
-        return@QuadLiveDataAsync results
+        return@QuintLiveDataAsync results
     }
 
     private var _messageForUser = MutableLiveData<Event<String>>()
@@ -179,39 +192,6 @@ class LibraryViewModel(
         return author1SortName.compareTo(author2SortName)
     }
 
-    /** Compares Book titles using numerical ordering */
-    private fun sortTitleComparator(bookTitle1: String, bookTitle2: String): Int {
-        fun titleToArray(bookTitle: String): List<String> {
-            return bookTitle.split(Regex("(?<=\\D)(?=\\d)|(?<=\\d)(?=\\D)"))
-        }
-
-        val title1: Iterator<String> = titleToArray(bookTitle1).iterator()
-        val title2: Iterator<String> = titleToArray(bookTitle2).iterator()
-
-        while (true) {
-            val bool1: Boolean = title1.hasNext()
-            val bool2: Boolean = title2.hasNext()
-            if (!(bool1 || bool2)) {
-                return 0
-            }
-            if (!bool1) return -1
-            if (!bool2) return 1
-
-            val next1: String = title1.next()
-            val next2: String = title2.next()
-
-            try {
-                if (next1.toInt() > next2.toInt())
-                    return 1
-                else if (next1.toInt() < next2.toInt())
-                    return -1
-            } catch (e: NumberFormatException) {
-                val comp: Int = next1.compareTo(next2)
-                if (comp != 0) return comp
-            }
-        }
-    }
-
     fun setSearchActive(isSearchActive: Boolean) {
         _isSearchActive.postValue(isSearchActive)
     }
@@ -222,9 +202,11 @@ class LibraryViewModel(
         if (query.isEmpty()) {
             _searchResults.postValue(emptyList())
         } else {
-            bookRepository.search(query).observeOnce(Observer {
-                _searchResults.postValue(it)
-            })
+            bookRepository.search(query).observeOnce(
+                Observer {
+                    _searchResults.postValue(it)
+                }
+            )
         }
     }
 
@@ -291,7 +273,8 @@ class LibraryViewModel(
                             else -> throw NoWhenBranchMatchedException()
                         }
                     }
-                })
+                }
+            )
         }
 
         // Prompt user to download
@@ -329,8 +312,8 @@ class LibraryViewModel(
         viewModelScope.launch(Injector.get().unhandledExceptionHandler()) {
             try {
                 _isRefreshing.postValue(true)
-                bookRepository.refreshData()
-                trackRepository.refreshData()
+                bookRepository.refreshDataPaginated()
+                trackRepository.refreshDataPaginated()
             } catch (e: Throwable) {
                 _messageForUser.postEvent("Failed to refresh data")
             } finally {
@@ -364,4 +347,9 @@ class LibraryViewModel(
         prefsRepo.isLibrarySortedDescending = !prefsRepo.isLibrarySortedDescending
     }
 
+    /** Toggles whether to show or hide played audiobooks in the library */
+    fun toggleHidePlayedAudiobooks() {
+        Timber.i("toggleHidePlayedAudiobooks")
+        prefsRepo.hidePlayedAudiobooks = !prefsRepo.hidePlayedAudiobooks
+    }
 }

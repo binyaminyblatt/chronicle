@@ -9,6 +9,8 @@ import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.support.v4.media.session.PlaybackStateCompat.STATE_PAUSED
 import android.text.format.DateUtils
+import android.view.Gravity
+import android.widget.Toast
 import androidx.lifecycle.*
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.github.michaelbull.result.Ok
@@ -37,6 +39,8 @@ import io.github.mattpvaughn.chronicle.views.BottomSheetChooser.*
 import io.github.mattpvaughn.chronicle.views.BottomSheetChooser.BottomChooserState.Companion.EMPTY_BOTTOM_CHOOSER
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import javax.inject.Inject
@@ -49,7 +53,8 @@ class CurrentlyPlayingViewModel(
     private val mediaServiceConnection: MediaServiceConnection,
     private val prefsRepo: PrefsRepo,
     private val plexConfig: PlexConfig,
-    private val currentlyPlaying: CurrentlyPlaying
+    private val currentlyPlaying: CurrentlyPlaying,
+    sharedPrefs: SharedPreferences
 ) : ViewModel() {
 
     @Suppress("UNCHECKED_CAST")
@@ -60,7 +65,8 @@ class CurrentlyPlayingViewModel(
         private val mediaServiceConnection: MediaServiceConnection,
         private val prefsRepo: PrefsRepo,
         private val plexConfig: PlexConfig,
-        private val currentlyPlaying: CurrentlyPlaying
+        private val currentlyPlaying: CurrentlyPlaying,
+        private val sharedPrefs: SharedPreferences,
     ) : ViewModelProvider.Factory {
         override fun <T : ViewModel?> create(modelClass: Class<T>): T {
             if (modelClass.isAssignableFrom(CurrentlyPlayingViewModel::class.java)) {
@@ -71,7 +77,8 @@ class CurrentlyPlayingViewModel(
                     mediaServiceConnection,
                     prefsRepo,
                     plexConfig,
-                    currentlyPlaying
+                    currentlyPlaying,
+                    sharedPrefs
                 ) as T
             } else {
                 throw IllegalArgumentException("Incorrect class type provided")
@@ -122,9 +129,22 @@ class CurrentlyPlayingViewModel(
             }
         }
 
-    private var _speed = MutableLiveData(prefsRepo.playbackSpeed)
-    val speed: LiveData<Float>
-        get() = _speed
+    val speed = FloatPreferenceLiveData(
+        PrefsRepo.KEY_PLAYBACK_SPEED,
+        PLAYBACK_SPEED_DEFAULT,
+        sharedPrefs
+    ).map {
+        Timber.i("Speed: %.2f", it)
+        return@map it.coerceIn(PLAYBACK_SPEED_MIN, PLAYBACK_SPEED_MAX)
+    }
+
+    val playbackSpeedString = Transformations.map(speed) { speed ->
+        return@map String.format("%.2f", speed) + "x"
+    }
+
+    private var _showModalBottomSheetSpeedChooser = MutableLiveData<Event<Unit>>()
+    val showModalBottomSheetSpeedChooser: LiveData<Event<Unit>>
+        get() = _showModalBottomSheetSpeedChooser
 
     val activeTrackId: LiveData<Int> =
         Transformations.map(mediaServiceConnection.nowPlaying) { metadata ->
@@ -136,8 +156,7 @@ class CurrentlyPlayingViewModel(
 
     val currentChapter = currentlyPlaying.chapter.asLiveData(viewModelScope.coroutineContext)
 
-    val chapterProgress = currentlyPlaying.chapter.combine(currentlyPlaying.track)
-    { chapter: Chapter, track: MediaItemTrack ->
+    val chapterProgress = currentlyPlaying.chapter.combine(currentlyPlaying.track) { chapter: Chapter, track: MediaItemTrack ->
         track.progress - chapter.startTimeOffset
     }.asLiveData(viewModelScope.coroutineContext)
 
@@ -147,6 +166,15 @@ class CurrentlyPlayingViewModel(
             progress / 1000
         )
     }
+
+    val chapterProgressForSlider = currentlyPlaying.chapter.combine(currentlyPlaying.track) { chapter: Chapter, track: MediaItemTrack ->
+        track.progress - chapter.startTimeOffset
+    }.filter { !isSliding }.asLiveData(viewModelScope.coroutineContext)
+
+    val trackProgressForSlider = currentlyPlaying.track
+        .filter { !isSliding }
+        .map { it.progress }
+        .asLiveData(viewModelScope.coroutineContext)
 
     val chapterDuration = Transformations.map(currentChapter) {
         return@map it.endTimeOffset - it.startTimeOffset
@@ -159,11 +187,17 @@ class CurrentlyPlayingViewModel(
         )
     }
 
+    var isSliding = false
+
     private var _isSleepTimerActive = MutableLiveData(false)
     val isSleepTimerActive: LiveData<Boolean>
         get() = _isSleepTimerActive
 
-    private var sleepTimerTimeRemaining = 0L
+    private var sleepTimerTimeRemaining = MutableLiveData(0L)
+
+    val sleepTimerTimeRemainingString = Transformations.map(sleepTimerTimeRemaining) {
+        return@map DateUtils.formatElapsedTime(StringBuilder(), it / 1000)
+    }
 
     val isPlaying: LiveData<Boolean> =
         Transformations.map(mediaServiceConnection.playbackState) { state ->
@@ -181,12 +215,17 @@ class CurrentlyPlayingViewModel(
         return@map DateUtils.formatElapsedTime(StringBuilder(), track.duration / 1000)
     }
 
-    val bookProgressString = Transformations.map(tracks) {
-        return@map DateUtils.formatElapsedTime(StringBuilder(), it.getProgress() / 1000)
+    val progressString = Transformations.map(tracks) { tracks: List<MediaItemTrack> ->
+        if (tracks.isEmpty()) {
+            return@map "0:00/0:00"
+        }
+        val progressStr = DateUtils.formatElapsedTime(StringBuilder(), tracks.getProgress() / 1000L)
+        val durationStr = DateUtils.formatElapsedTime(StringBuilder(), tracks.getDuration() / 1000L)
+        return@map "$progressStr/$durationStr"
     }
 
-    val bookDurationString = Transformations.map(audiobook) {
-        return@map DateUtils.formatElapsedTime(StringBuilder(), it?.duration?.div(1000) ?: 0)
+    val progressPercentageString = Transformations.map(tracks) { tracks: List<MediaItemTrack> ->
+        return@map "${tracks.getProgressPercentage()}%"
     }
 
     private val cachedChapter = DoubleLiveData(
@@ -212,8 +251,7 @@ class CurrentlyPlayingViewModel(
         }
     }.asFlow()
 
-    val activeChapter = currentlyPlaying.chapter.combine(cachedChapter)
-    { activeChapter: Chapter, cachedChapter: Chapter ->
+    val activeChapter = currentlyPlaying.chapter.combine(cachedChapter) { activeChapter: Chapter, cachedChapter: Chapter ->
         Timber.i("Cached: $cachedChapter, active: $activeChapter")
         if (activeChapter != EMPTY_CHAPTER && activeChapter.trackId == cachedChapter.trackId) {
             activeChapter
@@ -234,9 +272,18 @@ class CurrentlyPlayingViewModel(
     val sleepTimerChooserState: LiveData<BottomChooserState>
         get() = _sleepTimerChooserState
 
+    private var _jumpForwardsIcon = MutableLiveData(makeJumpForwardsIcon())
+    val jumpForwardsIcon: LiveData<Int>
+        get() = _jumpForwardsIcon
+
+    private var _jumpBackwardsIcon = MutableLiveData(makeJumpBackwardsIcon())
+    val jumpBackwardsIcon: LiveData<Int>
+        get() = _jumpBackwardsIcon
+
     private val prefsChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         when (key) {
-            PrefsRepo.KEY_PLAYBACK_SPEED -> _speed.postValue(prefsRepo.playbackSpeed)
+            PrefsRepo.KEY_JUMP_FORWARD_SECONDS -> _jumpForwardsIcon.value = makeJumpForwardsIcon()
+            PrefsRepo.KEY_JUMP_BACKWARD_SECONDS -> _jumpBackwardsIcon.value = makeJumpBackwardsIcon()
         }
     }
 
@@ -344,12 +391,77 @@ class CurrentlyPlayingViewModel(
         }
     }
 
+    fun skipToNext() {
+        skipToChapter(SKIP_TO_NEXT, forward = true)
+    }
+
+    fun skipToPrevious() {
+        skipToChapter(SKIP_TO_PREVIOUS, forward = false)
+    }
+
+    private fun skipToChapter(action: PlaybackStateCompat.CustomAction, forward: Boolean) {
+        val transportControls = mediaServiceConnection.transportControls
+        mediaServiceConnection.let { connection ->
+            if (connection.nowPlaying.value != NOTHING_PLAYING) {
+                // Service will be alive, so we can let it handle the action
+                Timber.i("Seeking!")
+                transportControls?.sendCustomAction(action, null)
+            } else {
+                val currentChapterIndex = currentlyPlaying.book.value.chapters.indexOf(currentlyPlaying.chapter.value)
+                var skipToChapterIndex: Int
+                if (forward) {
+                    skipToChapterIndex = currentChapterIndex + 1
+                    if (skipToChapterIndex < currentlyPlaying.book.value.chapters.size) {
+                        val skipToChapter = currentlyPlaying.book.value.chapters[skipToChapterIndex]
+                        jumpToChapter(skipToChapter.startTimeOffset, currentlyPlaying.track.value.id, hasUserConfirmation = true)
+                    } else {
+                        val toast = Toast.makeText(
+                            Injector.get().applicationContext(), R.string.skip_forwards_reached_last_chapter,
+                            Toast.LENGTH_LONG
+                        )
+                        toast.setGravity(Gravity.BOTTOM, 0, 200)
+                        toast.show()
+                    }
+                } else {
+                    skipToChapterIndex = currentChapterIndex - 1
+                    if (skipToChapterIndex < 0) skipToChapterIndex = 0
+                    val skipToChapter = currentlyPlaying.book.value.chapters[skipToChapterIndex]
+                    jumpToChapter(skipToChapter.startTimeOffset, currentlyPlaying.track.value.id, hasUserConfirmation = true)
+                }
+            }
+        }
+    }
+
+    fun makeJumpForwardsIcon(): Int {
+        return when (prefsRepo.jumpForwardSeconds) {
+            10L -> R.drawable.ic_forward_10_white
+            15L -> R.drawable.ic_forward_15_white
+            20L -> R.drawable.ic_forward_20_white
+            30L -> R.drawable.ic_forward_30_white
+            60L -> R.drawable.ic_forward_60_white
+            90L -> R.drawable.ic_forward_90_white
+            else -> R.drawable.ic_forward_30_white
+        }
+    }
+
+    fun makeJumpBackwardsIcon(): Int {
+        return when (prefsRepo.jumpBackwardSeconds) {
+            10L -> R.drawable.ic_replay_10_white
+            15L -> R.drawable.ic_replay_15_white
+            20L -> R.drawable.ic_replay_20_white
+            30L -> R.drawable.ic_replay_30_white
+            60L -> R.drawable.ic_replay_60_white
+            90L -> R.drawable.ic_replay_90_white
+            else -> R.drawable.ic_replay_10_white
+        }
+    }
+
     fun skipForwards() {
-        seekRelative(SKIP_FORWARDS, SKIP_FORWARDS_DURATION_MS_SIGNED)
+        seekRelative(makeSkipForward(prefsRepo), prefsRepo.jumpForwardSeconds * MILLIS_PER_SECOND)
     }
 
     fun skipBackwards() {
-        seekRelative(SKIP_BACKWARDS, SKIP_BACKWARDS_DURATION_MS_SIGNED)
+        seekRelative(makeSkipBackward(prefsRepo), prefsRepo.jumpBackwardSeconds * MILLIS_PER_SECOND * -1)
     }
 
     private fun seekRelative(action: PlaybackStateCompat.CustomAction, offset: Long) {
@@ -384,7 +496,6 @@ class CurrentlyPlayingViewModel(
         }
     }
 
-
     /** Jumps to a given track with [MediaItemTrack.id] == [trackId] */
     fun jumpToChapter(
         startTimeOffset: Long = 0,
@@ -404,7 +515,8 @@ class CurrentlyPlayingViewModel(
                         }
                         hideOptionsMenu()
                     }
-                })
+                }
+            )
             return
         }
 
@@ -431,7 +543,7 @@ class CurrentlyPlayingViewModel(
         } else {
             FormattableString.ResourceString(
                 R.string.sleep_timer_active_title,
-                placeHolderStrings = listOf(DateUtils.formatElapsedTime(sleepTimerTimeRemaining / MILLIS_PER_SECOND))
+                placeHolderStrings = listOf(sleepTimerTimeRemainingString.value ?: "<Error>")
             )
         }
         val options = if (isSleepTimerActive.value == true) {
@@ -446,6 +558,9 @@ class CurrentlyPlayingViewModel(
                 FormattableString.from(R.string.sleep_timer_duration_15_minutes),
                 FormattableString.from(R.string.sleep_timer_duration_30_minutes),
                 FormattableString.from(R.string.sleep_timer_duration_40_minutes),
+                FormattableString.from(R.string.sleep_timer_duration_60_minutes),
+                FormattableString.from(R.string.sleep_timer_duration_90_minutes),
+                FormattableString.from(R.string.sleep_timer_duration_120_minutes),
                 FormattableString.from(R.string.sleep_timer_duration_end_of_chapter)
             )
         }
@@ -470,9 +585,25 @@ class CurrentlyPlayingViewModel(
                         val duration = 40 * SECONDS_PER_MINUTE * MILLIS_PER_SECOND
                         BEGIN to duration
                     }
+                    R.string.sleep_timer_duration_60_minutes -> {
+                        val duration = 60 * SECONDS_PER_MINUTE * MILLIS_PER_SECOND
+                        BEGIN to duration
+                    }
+                    R.string.sleep_timer_duration_90_minutes -> {
+                        val duration = 90 * SECONDS_PER_MINUTE * MILLIS_PER_SECOND
+                        BEGIN to duration
+                    }
+                    R.string.sleep_timer_duration_120_minutes -> {
+                        val duration = 120 * SECONDS_PER_MINUTE * MILLIS_PER_SECOND
+                        BEGIN to duration
+                    }
                     R.string.sleep_timer_duration_end_of_chapter -> {
-                        val duration = ((chapterDuration.value ?: 0L) - (chapterProgress.value
-                            ?: 0L) / prefsRepo.playbackSpeed).toLong()
+                        val duration = (
+                            (chapterDuration.value ?: 0L) - (
+                                chapterProgress.value
+                                    ?: 0L
+                                ) / prefsRepo.playbackSpeed
+                            ).toLong()
                         BEGIN to duration
                     }
                     R.string.sleep_timer_append -> {
@@ -510,42 +641,12 @@ class CurrentlyPlayingViewModel(
         )
     }
 
-    fun showSpeedChooser() {
+    fun showPlaybackSpeedChooser() {
         if (!prefsRepo.isPremium) {
             _showUserMessage.postEvent("Error: variable playback speed is a premium feature")
             return
         }
-        showOptionsMenu(
-            title = FormattableString.from(R.string.playback_speed_title),
-            options = listOf(
-                FormattableString.from(R.string.playback_speed_0_5x),
-                FormattableString.from(R.string.playback_speed_0_7x),
-                FormattableString.from(R.string.playback_speed_1_0x),
-                FormattableString.from(R.string.playback_speed_1_2x),
-                FormattableString.from(R.string.playback_speed_1_5x),
-                FormattableString.from(R.string.playback_speed_1_7x),
-                FormattableString.from(R.string.playback_speed_2_0x),
-                FormattableString.from(R.string.playback_speed_3_0x)
-            ),
-            listener = object : BottomChooserItemListener() {
-                override fun onItemClicked(formattableString: FormattableString) {
-                    check(formattableString is FormattableString.ResourceString)
-
-                    prefsRepo.playbackSpeed = when (formattableString.stringRes) {
-                        R.string.playback_speed_0_5x -> 0.5f
-                        R.string.playback_speed_0_7x -> 0.7f
-                        R.string.playback_speed_1_0x -> 1.0f
-                        R.string.playback_speed_1_2x -> 1.2f
-                        R.string.playback_speed_1_5x -> 1.5f
-                        R.string.playback_speed_1_7x -> 1.7f
-                        R.string.playback_speed_2_0x -> 2.0f
-                        R.string.playback_speed_3_0x -> 3.0f
-                        else -> throw NoWhenBranchMatchedException("Unknown playback speed selected")
-                    }
-                    hideOptionsMenu()
-                }
-            }
-        )
+        _showModalBottomSheetSpeedChooser.postEvent(Unit)
     }
 
     private fun hideSleepTimerChooser() {
@@ -575,7 +676,6 @@ class CurrentlyPlayingViewModel(
         )
     }
 
-
     val onUpdateSleepTimer = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null || !intent.hasExtra(ARG_SLEEP_TIMER_DURATION_MILLIS)) {
@@ -584,12 +684,13 @@ class CurrentlyPlayingViewModel(
             val timeLeftMillis = intent.getLongExtra(ARG_SLEEP_TIMER_DURATION_MILLIS, 0L)
             val shouldSleepSleepTimerBeActive = timeLeftMillis > 0L
             _isSleepTimerActive.postValue(shouldSleepSleepTimerBeActive)
-            sleepTimerTimeRemaining = timeLeftMillis
+            sleepTimerTimeRemaining.value = timeLeftMillis
+
             if (shouldSleepSleepTimerBeActive) {
                 setSleepTimerTitle(
                     FormattableString.ResourceString(
                         stringRes = R.string.sleep_timer_active_title,
-                        placeHolderStrings = listOf(DateUtils.formatElapsedTime(timeLeftMillis / MILLIS_PER_SECOND))
+                        placeHolderStrings = listOf(sleepTimerTimeRemainingString.value ?: "<Error>")
                     )
                 )
             } else {
@@ -630,5 +731,12 @@ class CurrentlyPlayingViewModel(
                 mediaServiceConnection.transportControls?.seekTo(offset)
             }
         }
+    }
+
+    companion object {
+        /** Minimal and maximal allowed playback speed. */
+        const val PLAYBACK_SPEED_MIN = 0.5f
+        const val PLAYBACK_SPEED_DEFAULT = 1.0f
+        const val PLAYBACK_SPEED_MAX = 3.0f
     }
 }

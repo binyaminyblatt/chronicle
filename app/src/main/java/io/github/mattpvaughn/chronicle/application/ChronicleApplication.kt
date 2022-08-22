@@ -10,10 +10,6 @@ import android.net.Network
 import android.os.Build
 import android.os.StrictMode
 import android.os.StrictMode.VmPolicy
-import com.android.billingclient.api.BillingClient
-import com.android.billingclient.api.BillingClient.BillingResponseCode.OK
-import com.android.billingclient.api.BillingClientStateListener
-import com.android.billingclient.api.BillingResult
 import com.bumptech.glide.Glide
 import com.facebook.drawee.backends.pipeline.Fresco
 import com.facebook.imagepipeline.core.ImagePipelineConfig
@@ -63,9 +59,6 @@ open class ChronicleApplication : Application() {
     lateinit var billingManager: ChronicleBillingManager
 
     @Inject
-    lateinit var billingClient: BillingClient
-
-    @Inject
     lateinit var unhandledExceptionHandler: CoroutineExceptionHandler
 
     @Inject
@@ -105,7 +98,6 @@ open class ChronicleApplication : Application() {
 
         appComponent.inject(this)
         setupNetwork(plexPrefs)
-        setupBilling()
         updateDownloadedFileState()
         super.onCreate()
         Fresco.initialize(this, frescoConfig)
@@ -128,30 +120,6 @@ open class ChronicleApplication : Application() {
         }
     }
 
-    private var billingSetupAttempts = 0
-
-    private fun setupBilling() {
-        billingClient.startConnection(object : BillingClientStateListener {
-            override fun onBillingSetupFinished(billingResult: BillingResult) {
-                if (billingResult.responseCode == OK) {
-                    Timber.i("Billing client setup successful: $billingClient")
-                    billingManager.billingClient = billingClient
-                } else {
-                    Timber.w("Billing client setup failed! ${billingResult.debugMessage}")
-                }
-            }
-
-            override fun onBillingServiceDisconnected() {
-                // Try to restart the connection on the next request to
-                // Google Play by calling the startConnection() method.
-                billingSetupAttempts++
-                if (billingSetupAttempts < 3) {
-                    billingClient.startConnection(this)
-                }
-            }
-        })
-    }
-
     open fun initializeComponent(): AppComponent {
         // We pass the applicationContext that will be used as Context in the graph
         return DaggerAppComponent.builder().appModule(AppModule(this)).build()
@@ -170,29 +138,32 @@ open class ChronicleApplication : Application() {
             getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             connectivityManager.registerDefaultNetworkCallback(object :
-                ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    connectToServer()
-                    super.onAvailable(network)
-                }
-
-                override fun onLost(network: Network) {
-                    // Prevent from running on ConnectivityThread, because onLost is apparently
-                    // called on ConnectivityThread with no warning
-                    applicationScope.launch {
-                        withContext(Dispatchers.Main) {
-                            plexConfig.connectionHasBeenLost()
-                        }
+                    ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        connectToServer()
+                        super.onAvailable(network)
                     }
-                    super.onLost(network)
-                }
-            })
+
+                    override fun onLost(network: Network) {
+                        // Prevent from running on ConnectivityThread, because onLost is apparently
+                        // called on ConnectivityThread with no warning
+                        applicationScope.launch {
+                            withContext(Dispatchers.Main) {
+                                plexConfig.connectionHasBeenLost()
+                            }
+                        }
+                        super.onLost(network)
+                    }
+                })
         } else {
             // network listener for sdk 24 and below
-            registerReceiver(networkStateListener, IntentFilter().apply {
-                @Suppress("DEPRECATION")
-                addAction(ConnectivityManager.CONNECTIVITY_ACTION)
-            })
+            registerReceiver(
+                networkStateListener,
+                IntentFilter().apply {
+                    @Suppress("DEPRECATION")
+                    addAction(ConnectivityManager.CONNECTIVITY_ACTION)
+                }
+            )
         }
         val server = plexPrefs.server
         if (server != null) {
@@ -252,5 +223,4 @@ open class ChronicleApplication : Application() {
         Fresco.getImagePipeline().clearMemoryCaches()
         super.onLowMemory()
     }
-
 }

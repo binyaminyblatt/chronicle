@@ -91,7 +91,6 @@ class PlexLoginRepo @Inject constructor(
     }
 
     override fun chooseUser(responseUser: PlexUser) {
-        check(!responseUser.authToken.isNullOrEmpty())
         plexPrefsRepo.user = responseUser
         _loginState.postEvent(LOGGED_IN_NO_SERVER_CHOSEN)
     }
@@ -99,13 +98,15 @@ class PlexLoginRepo @Inject constructor(
     override fun makeOAuthUrl(clientId: String, code: String): Uri {
         // Keep [ and ] characters for readability, replace with escaped chars below
         return Uri.parse(
-            ("https://app.plex.tv/auth#?code=$code"
-                    + "&context[device][product]=$PRODUCT"
-                    + "&context[device][environment]=bundled"
-                    + "&context[device][layout]=desktop"
-                    + "&context[device][platform]=$PLATFORM"
-                    + "&context[device][device]=$PRODUCT"
-                    + "&clientID=$clientId")
+            (
+                "https://app.plex.tv/auth#?code=$code" +
+                    "&context[device][product]=$PRODUCT" +
+                    "&context[device][environment]=bundled" +
+                    "&context[device][layout]=desktop" +
+                    "&context[device][platform]=$PLATFORM" +
+                    "&context[device][device]=$PRODUCT" +
+                    "&clientID=$clientId"
+                )
                 .replace("[", "%5B")
                 .replace("]", "%5D")
         )

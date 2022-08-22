@@ -1,7 +1,6 @@
 package io.github.mattpvaughn.chronicle.data.local
 
 import android.content.SharedPreferences
-import com.android.billingclient.api.Purchase
 import io.github.mattpvaughn.chronicle.BuildConfig
 import io.github.mattpvaughn.chronicle.application.Injector
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_ALLOW_AUTO
@@ -9,8 +8,11 @@ import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_AUTO_R
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_BOOK_COVER_STYLE
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_BOOK_SORT_BY
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_DEBUG_DISABLE_PROGRESS
+import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_HIDE_PLAYED_AUDIOBOOKS
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_IS_LIBRARY_SORT_DESCENDING
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_IS_PREMIUM
+import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_JUMP_BACKWARD_SECONDS
+import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_JUMP_FORWARD_SECONDS
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_LAST_REFRESH
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_LIBRARY_MEDIA_TYPE
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.KEY_LIBRARY_VIEW_STYLE
@@ -27,6 +29,7 @@ import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.VIEW_STYLE
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo.Companion.VIEW_STYLE_COVER_GRID
 import io.github.mattpvaughn.chronicle.data.model.Audiobook
 import io.github.mattpvaughn.chronicle.data.sources.plex.model.MediaType
+import io.github.mattpvaughn.chronicle.features.currentlyplaying.CurrentlyPlayingViewModel.Companion.PLAYBACK_SPEED_DEFAULT
 import io.github.mattpvaughn.chronicle.injection.components.AppComponent
 import java.io.File
 import javax.inject.Inject
@@ -71,6 +74,12 @@ interface PrefsRepo {
     /** The minimum number of minutes between data refreshes*/
     var refreshRateMinutes: Long
 
+    /** The time interval for jumping forward in the player view.*/
+    var jumpForwardSeconds: Long
+
+    /** The time interval for jumping backward in the player view.*/
+    var jumpBackwardSeconds: Long
+
     /** The user's IAP token returned in a [Purchase] upon paying for an upgrade to premium */
     var premiumPurchaseToken: String
 
@@ -85,6 +94,9 @@ interface PrefsRepo {
 
     /** Whether the library is sorted in descending (true) or ascending (false) order */
     var isLibrarySortedDescending: Boolean
+
+    /** Whether played audiobooks should be hidden in the library */
+    var hidePlayedAudiobooks: Boolean
 
     /**
      * Get a saved preference value corresponding to [key], providing [defaultValue] if no value
@@ -117,6 +129,8 @@ interface PrefsRepo {
         const val KEY_OFFLINE_MODE = "key_offline_mode"
         const val KEY_LAST_REFRESH = "key_last_refresh"
         const val KEY_REFRESH_RATE = "key_refresh_rate"
+        const val KEY_JUMP_FORWARD_SECONDS = "key_jump_forward_seconds"
+        const val KEY_JUMP_BACKWARD_SECONDS = "key_jump_backward_seconds"
         const val KEY_PLAYBACK_SPEED = "key_playback_speed"
         const val KEY_DEBUG_DISABLE_PROGRESS = "debug_key_disable_local_progress"
         const val KEY_SKIP_SILENCE = "key_skip_silence"
@@ -129,6 +143,7 @@ interface PrefsRepo {
         const val KEY_PREMIUM_TOKEN = "key_premium_token"
         const val KEY_BOOK_SORT_BY = "key_sort_by"
         const val KEY_IS_LIBRARY_SORT_DESCENDING = "key_is_sort_descending"
+        const val KEY_HIDE_PLAYED_AUDIOBOOKS = "key_hide_played_audiobooks"
         const val KEY_LIBRARY_MEDIA_TYPE = "key_media_type"
         const val KEY_LIBRARY_VIEW_STYLE = "key_library_view_style"
         const val VIEW_STYLE_COVER_GRID = "view_style_cover_grid"
@@ -191,7 +206,17 @@ class SharedPreferencesPrefsRepo @Inject constructor(private val sharedPreferenc
         get() = sharedPreferences.getLong(KEY_REFRESH_RATE, defaultRefreshRate)
         set(value) = sharedPreferences.edit().putLong(KEY_REFRESH_RATE, value).apply()
 
-    private val defaultPlaybackSpeed = 1.0f
+    private val defaultJumpForwardSeconds = 30L
+    override var jumpForwardSeconds: Long
+        get() = sharedPreferences.getLong(KEY_JUMP_FORWARD_SECONDS, defaultJumpForwardSeconds)
+        set(value) = sharedPreferences.edit().putLong(KEY_JUMP_FORWARD_SECONDS, value).apply()
+
+    private val defaultJumpBackwardSeconds = 10L
+    override var jumpBackwardSeconds: Long
+        get() = sharedPreferences.getLong(KEY_JUMP_BACKWARD_SECONDS, defaultJumpBackwardSeconds)
+        set(value) = sharedPreferences.edit().putLong(KEY_JUMP_BACKWARD_SECONDS, value).apply()
+
+    private val defaultPlaybackSpeed = PLAYBACK_SPEED_DEFAULT
     override var playbackSpeed: Float
         get() = sharedPreferences.getFloat(KEY_PLAYBACK_SPEED, defaultPlaybackSpeed)
         set(value) = sharedPreferences.edit().putFloat(KEY_PLAYBACK_SPEED, value).apply()
@@ -223,7 +248,9 @@ class SharedPreferencesPrefsRepo @Inject constructor(private val sharedPreferenc
 
     private val defaultIsPremium = false
     override val isPremium: Boolean
-        get() = sharedPreferences.getBoolean(KEY_IS_PREMIUM, defaultIsPremium) || BuildConfig.DEBUG
+        get() = sharedPreferences.getBoolean(KEY_IS_PREMIUM, defaultIsPremium) ||
+            BuildConfig.DEBUG ||
+            BuildConfig.FREE_AS_IN_BEER
 
     private val defaultPremiumToken = NO_PREMIUM_TOKEN
     override var premiumPurchaseToken: String
@@ -250,6 +277,11 @@ class SharedPreferencesPrefsRepo @Inject constructor(private val sharedPreferenc
             sharedPreferences.edit().putBoolean(KEY_IS_LIBRARY_SORT_DESCENDING, value).apply()
         }
 
+    private val defaultHidePlayedAudiobooks = false
+    override var hidePlayedAudiobooks: Boolean
+        get() = getBoolean(KEY_HIDE_PLAYED_AUDIOBOOKS, defaultHidePlayedAudiobooks)
+        set(value) = sharedPreferences.edit().putBoolean(KEY_HIDE_PLAYED_AUDIOBOOKS, value).apply()
+
     private val viewTypeBook = "book"
     private val viewTypeAuthor = "author"
     private val viewTypeFolder = "folder"
@@ -264,7 +296,6 @@ class SharedPreferencesPrefsRepo @Inject constructor(private val sharedPreferenc
             }
             sharedPreferences.edit().putString(KEY_LIBRARY_MEDIA_TYPE, value).apply()
         }
-
 
     private val defaultLibraryViewStyle = VIEW_STYLE_COVER_GRID
     override var libraryBookViewStyle: String

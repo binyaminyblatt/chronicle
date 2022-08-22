@@ -20,6 +20,9 @@ interface PlexPrefsRepo {
      */
     var accountAuthToken: String
 
+    // TODO: exposes the most privileged token we currently have access to (via new class/func-
+    //       wouldn't be appropriate to use this class for it)
+
     /** The active user profile */
     var user: PlexUser?
 
@@ -165,7 +168,6 @@ class SharedPreferencesPlexPrefsRepo @Inject constructor(
         val combinedList = (localServers union remoteServers).toList()
         return combinedList.map { Connection(it) }
     }
-
 
     // TODO: ensure this is only usable for a certain amount of time
     override var oAuthTempId: Long

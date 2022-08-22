@@ -6,7 +6,6 @@ import okhttp3.Interceptor
 import okhttp3.Response
 import timber.log.Timber
 
-
 /**
  * Injects plex required headers
  *
@@ -49,11 +48,12 @@ class PlexInterceptor(
             .header("X-Plex-Device-Name", Build.MODEL)
             .url(interceptedUrl)
 
-        val authToken = if (isLoginService) {
-            plexPrefsRepo.user?.authToken ?: plexPrefsRepo.accountAuthToken
-        } else {
-            plexPrefsRepo.server?.accessToken ?: plexPrefsRepo.accountAuthToken
-        }
+        val userToken = plexPrefsRepo.user?.authToken
+        val serverToken = plexPrefsRepo.server?.accessToken
+        val accountToken = plexPrefsRepo.accountAuthToken
+
+        val serviceToken = if (isLoginService) userToken else serverToken
+        val authToken = if (serviceToken.isNullOrEmpty()) accountToken else serviceToken
 
         if (authToken.isNotEmpty()) {
             requestBuilder.header("X-Plex-Token", authToken)
@@ -61,5 +61,4 @@ class PlexInterceptor(
 
         return chain.proceed(requestBuilder.build())
     }
-
 }

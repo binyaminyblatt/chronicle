@@ -22,6 +22,8 @@ data class PlexDirectory(
     val thumb: String = "",
     val size: Int = 0,
     val summary: String = "",
+    val parentYear: Int = 0,
+    val year: Int = 0,
     val addedAt: Long = 0,
     val updatedAt: Long = 0,
     val viewedLeafCount: Long = 0,
@@ -44,6 +46,6 @@ fun PlexDirectory.asLibrary(): PlexLibrary {
         name = title,
         type = MediaType.TYPES.find { mediaType -> mediaType.typeString == this.type }
             ?: MediaType.ARTIST,
-        id = key)
+        id = key
+    )
 }
-

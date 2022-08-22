@@ -9,6 +9,7 @@ import io.github.mattpvaughn.chronicle.data.model.MediaItemTrack
 import io.github.mattpvaughn.chronicle.data.model.NO_AUDIOBOOK_FOUND_ID
 import io.github.mattpvaughn.chronicle.data.sources.MediaSource
 import io.github.mattpvaughn.chronicle.data.sources.plex.PlexMediaService
+import io.github.mattpvaughn.chronicle.data.sources.plex.PlexPrefsRepo
 import io.github.mattpvaughn.chronicle.data.sources.plex.model.MediaType
 import io.github.mattpvaughn.chronicle.data.sources.plex.model.asTrackList
 import kotlinx.coroutines.Dispatchers
@@ -122,13 +123,16 @@ interface ITrackRepository {
          */
         const val TRACK_NOT_FOUND: Int = -23
     }
+
+    suspend fun refreshDataPaginated()
 }
 
 @Singleton
 class TrackRepository @Inject constructor(
     private val trackDao: TrackDao,
     private val prefsRepo: PrefsRepo,
-    private val plexMediaService: PlexMediaService
+    private val plexMediaService: PlexMediaService,
+    private val plexPrefs: PlexPrefsRepo
 ) : ITrackRepository {
 
     @Throws(Throwable::class)
@@ -137,6 +141,39 @@ class TrackRepository @Inject constructor(
             return
         }
         loadAllTracksAsync()
+    }
+
+    override suspend fun refreshDataPaginated() {
+        if (prefsRepo.offlineMode) {
+            return
+        }
+        // TODO: this could possibly exhaust memory, ought have people w/ big libraries try it out
+        val networkTracks = mutableListOf<MediaItemTrack>()
+        withContext(Dispatchers.IO) {
+            try {
+                val libraryId = plexPrefs.library?.id ?: return@withContext
+                var tracksLeft = 1L
+                // Maximum number of pages of data we fetch. Failsafe in case of bad data from the
+                // server since we don't want infinite loops. This limits us to a maximum 1,000,000
+                // tracks for now
+                val maxIterations = 1000
+                var i = 0
+                while (tracksLeft > 0 && i < maxIterations) {
+                    val response = plexMediaService
+                        .retrieveTracksPaginated(libraryId, i * 100)
+                        .plexMediaContainer
+                    tracksLeft = response.totalSize - (response.offset + response.size)
+                    networkTracks.addAll(response.asTrackList())
+                    i++
+                }
+            } catch (t: Throwable) {
+                Timber.e("Failed to load tracks: $t")
+            }
+
+            val localTracks = trackDao.getAllTracksAsync()
+            val mergedTracks = mergeNetworkTracks(networkTracks, localTracks)
+            trackDao.insertAll(mergedTracks)
+        }
     }
 
     override suspend fun findTrackByTitle(title: String): MediaItemTrack? {
@@ -218,7 +255,6 @@ class TrackRepository @Inject constructor(
             trackDao.getAllTracksAsync()
         }
     }
-
 
     override fun getTracksForAudiobook(bookId: Int): LiveData<List<MediaItemTrack>> {
         return trackDao.getTracksForAudiobook(bookId, prefsRepo.offlineMode)
@@ -344,9 +380,9 @@ class TrackRepository @Inject constructor(
             if (networkTrackIdentifier in localTrackIdentifiers) {
                 Timber.e("Moving disappeared track: ${networkTrack.title}")
                 val cachedTrack = localTracks.firstOrNull {
-                    networkTrackIdentifier.duration == it.duration
-                            && networkTrackIdentifier.parentId == it.parentKey
-                            && networkTrackIdentifier.title == it.title
+                    networkTrackIdentifier.duration == it.duration &&
+                        networkTrackIdentifier.parentId == it.parentKey &&
+                        networkTrackIdentifier.title == it.title
                 }
                 if (cachedTrack != null) {
                     val cachedFile = File(prefsRepo.cachedMediaDir, cachedTrack.getCachedFileName())

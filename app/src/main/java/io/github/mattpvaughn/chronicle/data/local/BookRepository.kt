@@ -129,8 +129,12 @@ interface IBookRepository {
     /** Sets the book's [Audiobook.progress] to 0 in the DB and the server */
     suspend fun setWatched(bookId: Int)
 
+    suspend fun setUnwatched(bookId: Int)
+
     /** Loads an [Audiobook] in from the network */
     suspend fun fetchBookAsync(bookId: Int): Audiobook?
+
+    suspend fun refreshDataPaginated()
 }
 
 @Singleton
@@ -175,6 +179,64 @@ class BookRepository @Inject constructor(
         } ?: return
         //    ^^^ quit on network failure- nothing below matters without new books from server
 
+        val localBooks = withContext(Dispatchers.IO) { bookDao.getAudiobooks() }
+
+        val mergedBooks = networkBooks.map { networkBook ->
+            val localBook = localBooks.find { it.id == networkBook.id }
+            if (localBook != null) {
+                // [Audiobook.merge] chooses fields depending on [Audiobook.lastViewedAt]
+                return@map Audiobook.merge(network = networkBook, local = localBook)
+            } else {
+                return@map networkBook
+            }
+        }
+
+        // remove books which have been deleted from server
+        val networkIds = networkBooks.map { it.id }
+        val removedFromNetwork = localBooks.filter { localBook ->
+            !networkIds.contains(localBook.id)
+        }
+
+        Timber.i("Removed from network: ${removedFromNetwork.map { it.title }}")
+        withContext(Dispatchers.IO) {
+            val removed = bookDao.removeAll(removedFromNetwork.map { it.id.toString() })
+            Timber.i("Removed $removed items from DB")
+
+            Timber.i("Loaded books: $mergedBooks")
+            bookDao.insertAll(mergedBooks)
+        }
+    }
+
+    @Throws(Throwable::class)
+    override suspend fun refreshDataPaginated() {
+        if (prefsRepo.offlineMode) {
+            return
+        }
+
+        prefsRepo.lastRefreshTimeStamp = System.currentTimeMillis()
+        val networkBooks: MutableList<Audiobook> = mutableListOf()
+        withContext(Dispatchers.IO) {
+            try {
+                val libraryId = plexPrefsRepo.library?.id ?: return@withContext
+                var booksLeft = 1L
+                // Maximum number of pages of data we fetch. Failsafe in case of bad data from the
+                // server since we don't want infinite loops. This limits us to a maximum 1,000,000
+                // tracks for now
+                val maxIterations = 5000
+                var i = 0
+                while (booksLeft > 0 && i < maxIterations) {
+                    val response = plexMediaService
+                        .retrieveAlbumPage(libraryId, i * 100)
+                        .plexMediaContainer
+                    booksLeft = response.totalSize - (response.offset + response.size)
+                    networkBooks.addAll(response.asAudiobooks())
+                    i++
+                }
+            } catch (t: Throwable) {
+                Timber.i("Failed to retrieve books: $t")
+            }
+        }
+        //    ^^^ quit on network failure- nothing below matters without new books from server
 
         val localBooks = withContext(Dispatchers.IO) { bookDao.getAudiobooks() }
 
@@ -291,6 +353,17 @@ class BookRepository @Inject constructor(
         }
     }
 
+    override suspend fun setUnwatched(bookId: Int) {
+        withContext(Dispatchers.IO) {
+            try {
+                plexMediaService.unwatched(bookId.toString())
+                bookDao.setUnwatched(bookId)
+            } catch (t: Throwable) {
+                Timber.e("Failed to update watched status: $t")
+            }
+        }
+    }
+
     override suspend fun getMostRecentlyPlayed(): Audiobook {
         return bookDao.getMostRecent() ?: EMPTY_AUDIOBOOK
     }
@@ -336,7 +409,7 @@ class BookRepository @Inject constructor(
     ): Boolean {
         Timber.i(
             "Loading chapter data. Book ID is ${audiobook.id}, it is ${
-                if (audiobook.isCached) "cached" else "uncached"
+            if (audiobook.isCached) "cached" else "uncached"
             }, tracks are $tracks"
         )
         withContext(Dispatchers.IO) {
@@ -383,7 +456,6 @@ class BookRepository @Inject constructor(
                 chapters = chapters
             )
             bookDao.update(merged)
-
         }
         return true
     }

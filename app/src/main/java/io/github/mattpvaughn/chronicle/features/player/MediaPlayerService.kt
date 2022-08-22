@@ -48,7 +48,9 @@ import kotlin.time.seconds
 /** The service responsible for media playback, notification */
 @ExperimentalCoroutinesApi
 @OptIn(ExperimentalTime::class)
-class MediaPlayerService : MediaBrowserServiceCompat(), ForegroundServiceController,
+class MediaPlayerService :
+    MediaBrowserServiceCompat(),
+    ForegroundServiceController,
     ServiceController,
     SleepTimer.SleepTimerBroadcaster {
 
@@ -188,7 +190,6 @@ class MediaPlayerService : MediaBrowserServiceCompat(), ForegroundServiceControl
 
         Timber.i("Service created! $this")
 
-
         updateAudioAttrs(simpleExoPlayer = exoPlayer)
 
         prefsRepo.registerPrefsListener(prefsListener)
@@ -204,8 +205,9 @@ class MediaPlayerService : MediaBrowserServiceCompat(), ForegroundServiceControl
         mediaSessionConnector.setCustomActionProviders(
             *makeCustomActionProviders(
                 trackListManager,
-                mediaSessionConnector,
-                prefsRepo
+                prefsRepo,
+                currentlyPlaying,
+                progressUpdater
             )
         )
         mediaSessionConnector.setQueueNavigator(queueNavigator)
@@ -256,7 +258,6 @@ class MediaPlayerService : MediaBrowserServiceCompat(), ForegroundServiceControl
         }
     }
 
-
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         when (key) {
             PrefsRepo.KEY_SKIP_SILENCE, PrefsRepo.KEY_PLAYBACK_SPEED -> {
@@ -264,6 +265,16 @@ class MediaPlayerService : MediaBrowserServiceCompat(), ForegroundServiceControl
             }
             PrefsRepo.KEY_PAUSE_ON_FOCUS_LOST -> {
                 updateAudioAttrs(exoPlayer)
+            }
+            PrefsRepo.KEY_JUMP_FORWARD_SECONDS, PrefsRepo.KEY_JUMP_BACKWARD_SECONDS -> {
+                serviceScope.launch {
+                    withContext(Dispatchers.IO) {
+                        sessionToken?.let {
+                            val notification = notificationBuilder.buildNotification(it)
+                            startForeground(NOW_PLAYING_NOTIFICATION, notification)
+                        }
+                    }
+                }
             }
         }
     }
@@ -425,52 +436,61 @@ class MediaPlayerService : MediaBrowserServiceCompat(), ForegroundServiceControl
                 when (parentId) {
                     CHRONICLE_MEDIA_ROOT_ID -> {
                         result.sendResult(
-                            (listOf(
-                                makeBrowsable(
-                                    getString(R.string.auto_category_recently_listened),
-                                    R.drawable.ic_recent
-                                )
-                            )
-                                    + listOf(
-                                makeBrowsable(
-                                    getString(R.string.auto_category_offline),
-                                    R.drawable.ic_cloud_download_white
-                                )
-                            )
-                                    + listOf(
-                                makeBrowsable(
-                                    getString(R.string.auto_category_recently_added),
-                                    R.drawable.ic_add
-                                )
-                            )
-                                    + listOf(
-                                makeBrowsable(
-                                    getString(R.string.auto_category_library),
-                                    R.drawable.nav_library
-                                )
-                            )
-                                    ).toMutableList()
+                            (
+                                listOf(
+                                    makeBrowsable(
+                                        getString(R.string.auto_category_recently_listened),
+                                        R.drawable.ic_recent
+                                    )
+                                ) +
+                                    listOf(
+                                        makeBrowsable(
+                                            getString(R.string.auto_category_offline),
+                                            R.drawable.ic_cloud_download_white
+                                        )
+                                    ) +
+                                    listOf(
+                                        makeBrowsable(
+                                            getString(R.string.auto_category_recently_added),
+                                            R.drawable.ic_add
+                                        )
+                                    ) +
+                                    listOf(
+                                        makeBrowsable(
+                                            getString(R.string.auto_category_library),
+                                            R.drawable.nav_library
+                                        )
+                                    )
+                                ).toMutableList()
                         )
                     }
                     getString(R.string.auto_category_recently_listened) -> {
                         val recentlyListened = bookRepository.getRecentlyListenedAsync()
-                        result.sendResult(recentlyListened.map { it.toMediaItem(plexConfig) }
-                            .toMutableList())
+                        result.sendResult(
+                            recentlyListened.map { it.toMediaItem(plexConfig) }
+                                .toMutableList()
+                        )
                     }
                     getString(R.string.auto_category_recently_added) -> {
                         val recentlyAdded = bookRepository.getRecentlyAddedAsync()
-                        result.sendResult(recentlyAdded.map { it.toMediaItem(plexConfig) }
-                            .toMutableList())
+                        result.sendResult(
+                            recentlyAdded.map { it.toMediaItem(plexConfig) }
+                                .toMutableList()
+                        )
                     }
                     getString(R.string.auto_category_library) -> {
                         val books = bookRepository.getAllBooksAsync()
-                        result.sendResult(books.map { it.toMediaItem(plexConfig) }
-                            .toMutableList())
+                        result.sendResult(
+                            books.map { it.toMediaItem(plexConfig) }
+                                .toMutableList()
+                        )
                     }
                     getString(R.string.auto_category_offline) -> {
                         val offline = bookRepository.getCachedAudiobooksAsync()
-                        result.sendResult(offline.map { it.toMediaItem(plexConfig) }
-                            .toMutableList())
+                        result.sendResult(
+                            offline.map { it.toMediaItem(plexConfig) }
+                                .toMutableList()
+                        )
                     }
                 }
             }

@@ -5,9 +5,12 @@ import android.media.session.PlaybackState.*
 import android.os.Bundle
 import android.support.v4.media.session.PlaybackStateCompat
 import android.text.format.DateUtils
+import android.view.Gravity
+import android.widget.Toast
 import androidx.lifecycle.*
 import com.github.michaelbull.result.Ok
 import io.github.mattpvaughn.chronicle.R
+import io.github.mattpvaughn.chronicle.application.Injector
 import io.github.mattpvaughn.chronicle.data.local.IBookRepository
 import io.github.mattpvaughn.chronicle.data.local.ITrackRepository
 import io.github.mattpvaughn.chronicle.data.local.ITrackRepository.Companion.TRACK_NOT_FOUND
@@ -35,6 +38,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.combine
 import timber.log.Timber
 import javax.inject.Inject
+import kotlin.math.roundToInt
 
 @ExperimentalCoroutinesApi
 class AudiobookDetailsViewModel(
@@ -150,8 +154,8 @@ class AudiobookDetailsViewModel(
         activeBook,
         audiobook
     ) { activeBook, currentBook ->
-        return@DoubleLiveData activeBook?.id == currentBook?.id
-                && activeBook?.id != null
+        return@DoubleLiveData activeBook?.id == currentBook?.id &&
+            activeBook?.id != null
     }
 
     /** Whether the book in the current view is playing */
@@ -164,12 +168,16 @@ class AudiobookDetailsViewModel(
         }
 
     val progressString = Transformations.map(tracks) { tracks: List<MediaItemTrack> ->
-        if (tracks.isNullOrEmpty()) {
+        if (tracks.isEmpty()) {
             return@map "0:00/0:00"
         }
         val progressStr = DateUtils.formatElapsedTime(StringBuilder(), tracks.getProgress() / 1000L)
         val durationStr = DateUtils.formatElapsedTime(StringBuilder(), tracks.getDuration() / 1000L)
         return@map "$progressStr/$durationStr"
+    }
+
+    val progressPercentageString = Transformations.map(tracks) { tracks: List<MediaItemTrack> ->
+        return@map "${tracks.getProgressPercentage()}%"
     }
 
     private var _isLoadingTracks = MutableLiveData(false)
@@ -247,8 +255,7 @@ class AudiobookDetailsViewModel(
         }
     }.asFlow()
 
-    val activeChapter = currentlyPlaying.chapter.combine(cachedChapter)
-    { activeChapter: Chapter, cachedChapter: Chapter ->
+    val activeChapter = currentlyPlaying.chapter.combine(cachedChapter) { activeChapter: Chapter, cachedChapter: Chapter ->
         Timber.i("Cached: $cachedChapter, active: $activeChapter")
         if (activeChapter != EMPTY_CHAPTER && activeChapter.trackId == cachedChapter.trackId) {
             activeChapter
@@ -257,6 +264,9 @@ class AudiobookDetailsViewModel(
         }
     }.asLiveData(viewModelScope.coroutineContext)
 
+    val isWatchedIcon: LiveData<Int> = audiobook.map {
+        if (it?.viewCount != 0L) R.drawable.ic_visibility_off else R.drawable.ic_visibility
+    }
 
     init {
         plexConfig.isConnected.observeForever(networkObserver)
@@ -287,7 +297,7 @@ class AudiobookDetailsViewModel(
                 }
                 _isLoadingTracks.value = false
             } catch (e: Throwable) {
-                Timber.e("Failed to load tracks for audiobook ${bookId}: $e")
+                Timber.e("Failed to load tracks for audiobook $bookId: $e")
                 _isLoadingTracks.value = false
             }
         }
@@ -459,7 +469,8 @@ class AudiobookDetailsViewModel(
                         }
                         hideBottomSheet()
                     }
-                })
+                }
+            )
             return
         }
 
@@ -474,7 +485,6 @@ class AudiobookDetailsViewModel(
             jumpToChapterAction()
         }
     }
-
 
     private fun hideBottomSheet() {
         Timber.i("Hiding bottom sheet?")
@@ -504,14 +514,26 @@ class AudiobookDetailsViewModel(
     }
 
     fun toggleWatched() {
-        val prompt = R.string.prompt_mark_as_watched
+
+        val notPlayedYet = (audiobook.value?.viewCount ?: 0) == 0L
+
+        val prompt = if (notPlayedYet) {
+            R.string.prompt_mark_as_played
+        } else {
+            R.string.prompt_mark_as_unplayed
+        }
+
         showOptionsMenu(
             title = FormattableString.from(prompt),
             options = listOf(FormattableString.yes, FormattableString.no),
             listener = object : BottomChooserItemListener() {
                 override fun onItemClicked(formattableString: FormattableString) {
                     if (formattableString == FormattableString.yes) {
-                        setAudiobookWatched()
+                        if (notPlayedYet) {
+                            setAudiobookWatched()
+                        } else {
+                            setAudiobookUnwatched()
+                        }
                     }
                     hideBottomSheet()
                 }
@@ -527,6 +549,25 @@ class AudiobookDetailsViewModel(
             trackRepository.markTracksInBookAsWatched(inputAudiobook.id)
             bookRepository.setWatched(inputAudiobook.id)
         }
+        val toast = Toast.makeText(
+            Injector.get().applicationContext(), R.string.marked_as_played,
+            Toast.LENGTH_LONG
+        )
+        toast.setGravity(Gravity.BOTTOM, 0, 200)
+        toast.show()
+    }
+
+    private fun setAudiobookUnwatched() {
+        Timber.i("Marking audiobook as unwatched")
+        viewModelScope.launch {
+            bookRepository.setUnwatched(inputAudiobook.id)
+        }
+        val toast = Toast.makeText(
+            Injector.get().applicationContext(), R.string.marked_as_unplayed,
+            Toast.LENGTH_LONG
+        )
+        toast.setGravity(Gravity.BOTTOM, 0, 200)
+        toast.show()
     }
 
     private var _forceSyncInProgress = MutableLiveData(false)
@@ -574,4 +615,3 @@ class AudiobookDetailsViewModel(
         }
     }
 }
-

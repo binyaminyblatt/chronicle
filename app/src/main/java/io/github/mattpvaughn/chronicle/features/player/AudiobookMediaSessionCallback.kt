@@ -8,6 +8,7 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.text.format.DateUtils
 import android.view.KeyEvent
 import android.view.KeyEvent.*
+import androidx.lifecycle.Observer
 import com.github.michaelbull.result.Ok
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.Player
@@ -17,6 +18,7 @@ import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSourceFactory
 import io.github.mattpvaughn.chronicle.BuildConfig
 import io.github.mattpvaughn.chronicle.application.Injector
+import io.github.mattpvaughn.chronicle.application.MILLIS_PER_SECOND
 import io.github.mattpvaughn.chronicle.data.local.IBookRepository
 import io.github.mattpvaughn.chronicle.data.local.ITrackRepository
 import io.github.mattpvaughn.chronicle.data.local.PrefsRepo
@@ -53,6 +55,7 @@ class AudiobookMediaSessionCallback @Inject constructor(
     private val mediaSession: MediaSessionCompat,
     private val appContext: Context,
     private val currentlyPlaying: CurrentlyPlaying,
+    private val progressUpdater: ProgressUpdater,
     defaultPlayer: SimpleExoPlayer
 ) : MediaSessionCompat.Callback() {
 
@@ -114,19 +117,22 @@ class AudiobookMediaSessionCallback @Inject constructor(
         }
     }
 
+    private fun skipToNext() {
+        currentPlayer.skipToNext(trackListStateManager, currentlyPlaying, progressUpdater)
+    }
+
+    private fun skipToPrevious() {
+        currentPlayer.skipToPrevious(trackListStateManager, currentlyPlaying, progressUpdater)
+    }
+
     private fun skipForwards() {
         Timber.i("Track manager is $trackListStateManager")
-        currentPlayer.seekRelative(trackListStateManager, SKIP_FORWARDS_DURATION_MS_SIGNED)
+        currentPlayer.seekRelative(trackListStateManager, prefsRepo.jumpForwardSeconds * MILLIS_PER_SECOND)
     }
 
     private fun skipBackwards() {
         Timber.i("Track manager is $trackListStateManager")
-        currentPlayer.seekRelative(trackListStateManager, SKIP_BACKWARDS_DURATION_MS_SIGNED)
-    }
-
-    private fun changeSpeed() {
-        changeSpeed(trackListStateManager, mediaSessionConnector, prefsRepo)
-        Timber.i("New Speed: %s", prefsRepo.playbackSpeed)
+        currentPlayer.seekRelative(trackListStateManager, prefsRepo.jumpBackwardSeconds * MILLIS_PER_SECOND * -1)
     }
 
     override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
@@ -199,7 +205,8 @@ class AudiobookMediaSessionCallback @Inject constructor(
             }
             SKIP_FORWARDS_STRING -> skipForwards()
             SKIP_BACKWARDS_STRING -> skipBackwards()
-            CHANGE_PLAYBACK_SPEED -> changeSpeed()
+            SKIP_TO_NEXT_STRING -> skipToNext()
+            SKIP_TO_PREVIOUS_STRING -> skipToPrevious()
         }
     }
 
@@ -249,7 +256,7 @@ class AudiobookMediaSessionCallback @Inject constructor(
                 trackRepository.getTracksForAudiobookAsync(bookId.toInt())
             }
             if (tracks.isNullOrEmpty()) {
-                handlePlayBookWithNoTracks(bookId, tracks, extras)
+                handlePlayBookWithNoTracks(bookId, tracks, extras, playWhenReady)
                 return@launch
             }
 
@@ -344,7 +351,8 @@ class AudiobookMediaSessionCallback @Inject constructor(
     private suspend fun handlePlayBookWithNoTracks(
         bookId: String,
         tracks: List<MediaItemTrack>,
-        extras: Bundle
+        extras: Bundle,
+        playWhenReady: Boolean
     ) {
         Timber.i("No known tracks for book: $bookId, attempting to fetch them")
         // Tracks haven't been loaded by UI for this track, so load it here
@@ -362,7 +370,7 @@ class AudiobookMediaSessionCallback @Inject constructor(
             if (audiobook != null) {
                 bookRepository.syncAudiobook(audiobook, tracks)
             }
-            playBook(bookId, extras, true)
+            playBook(bookId, extras, playWhenReady)
         }
     }
 
@@ -384,26 +392,31 @@ class AudiobookMediaSessionCallback @Inject constructor(
      * refreshing data.
      */
     private fun resumePlayFromEmpty(playWhenReady: Boolean) {
-        // This is ugly but the callback shares the lifecycle of the service, so as long as the
-        // method is only called once we're okay...
-        plexConfig.isConnected.observeForever {
-            // Don't try starting playback until we've connected to a server
-            if (!it) {
-                return@observeForever
-            }
-
-            serviceScope.launch(Injector.get().unhandledExceptionHandler()) {
-                val mostRecentBook = bookRepository.getMostRecentlyPlayed()
-                if (mostRecentBook == EMPTY_AUDIOBOOK) {
-                    return@launch
+        val connectedObserver = object : Observer<Boolean> {
+            override fun onChanged(isConnected: Boolean) {
+                // Don't try starting playback until we've connected to a server
+                if (!isConnected) {
+                    return
                 }
-                if (playWhenReady) {
-                    onPlayFromMediaId(mostRecentBook.id.toString(), null)
-                } else {
-                    onPrepareFromMediaId(mostRecentBook.id.toString(), null)
+
+                // Only run these resume methods once after reconnecting
+                plexConfig.isConnected.removeObserver(this)
+
+                serviceScope.launch(Injector.get().unhandledExceptionHandler()) {
+                    val mostRecentBook = bookRepository.getMostRecentlyPlayed()
+                    if (mostRecentBook == EMPTY_AUDIOBOOK) {
+                        return@launch
+                    }
+                    if (playWhenReady) {
+                        onPlayFromMediaId(mostRecentBook.id.toString(), null)
+                    } else {
+                        onPrepareFromMediaId(mostRecentBook.id.toString(), null)
+                    }
                 }
             }
         }
+
+        plexConfig.isConnected.observeForever(connectedObserver)
     }
 
     // Kill the playback service when stop() is called, so Service can be recreated when needed
@@ -416,4 +429,3 @@ class AudiobookMediaSessionCallback @Inject constructor(
         serviceController.stopService()
     }
 }
-
