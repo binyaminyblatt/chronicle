@@ -128,7 +128,7 @@ class LibraryViewModel(
                 Comparator { book1, book2 ->
                     val descMultiplier = if (desc) 1 else -1
                     return@Comparator descMultiplier * when (key) {
-                        SORT_KEY_AUTHOR -> book1.author.compareTo(book2.author)
+                        SORT_KEY_AUTHOR -> sortAuthorComparator(book1.author, book2.author)
                         SORT_KEY_TITLE -> book1.titleSort.compareTo(book2.titleSort)
                         SORT_KEY_PLAYS -> book2.viewedLeafCount.compareTo(book1.viewedLeafCount)
                         SORT_KEY_DURATION -> book2.duration.compareTo(book1.duration)
@@ -179,6 +179,17 @@ class LibraryViewModel(
             it.any { track -> !track.cached } -> NOT_CACHED
             else -> NOT_CACHED
         }
+    }
+
+    /** Since an authorSort value is currently unavailable, this function attempts to sort authors by last name */
+    private fun sortAuthorComparator(author1: String, author2: String): Int {
+        val author1Names: List<String> = author1.split(" ")
+        val author2Names: List<String> = author2.split(" ")
+
+        val author1SortName: String = if (author1Names.size > 1) author1Names.last() + ", " + author1Names.subList(0, author1Names.size - 1).joinToString(" ") else author1
+        val author2SortName: String = if (author2Names.size > 1) author2Names.last() + ", " + author2Names.subList(0, author2Names.size - 1).joinToString(" ") else author2
+
+        return author1SortName.compareTo(author2SortName)
     }
 
     fun setSearchActive(isSearchActive: Boolean) {
